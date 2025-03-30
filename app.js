@@ -23,7 +23,6 @@ const ReferralCode = require("./src/models/Reffarelcode_from_sender");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 
-const serviceAccount = require("./src/config/kivicoin-389a4-firebase-adminsdk-fbsvc-2c6f0c6ddb.json"); // এখানে আপনার JSON ফাইলের পথ দিন
 
 const Payment = require("./src/models/package_confirmation"); // Import your Payment model
 
@@ -53,6 +52,10 @@ const corsOptions = {
     process.env.CLIENT_URI,
     process.env.ADMIN_URI,
     "https://sandbox.nowpayments.io/",
+    "https://api.nowpayments.io/",
+    "https://api.nowpayments.io/v1/",
+    "https://sandbox.nowpayments.io/v1/",
+    
   ], // Add both URLs here
   methods: ["GET", "POST", "DELETE", "PUT"],
   allowedHeaders: ["Content-Type"],
@@ -431,7 +434,7 @@ app.post("/register", async (req, res) => {
     await newUser.save();
 
     // Construct the verification link (adjust the URL if needed)
-    const verificationLink = `http://localhost:3000/verify/${verificationToken}`;
+    const verificationLink = `https://client.kivicoin.com/verify/${verificationToken}`;
 
     // Email options
    const mailOptions = {
@@ -607,11 +610,11 @@ app.post("/create-payment", async (req, res) => {
       price_currency: "usd",
       order_id: Order_ID,
       order_description: Product_Name,
-      ipn_callback_url: "http://localhost:5000/ipn/",
-      success_url: `http://localhost:3000/success?email=${encodeURIComponent(
+      ipn_callback_url: "https://server.kivicoin.com/ipn/",
+      success_url: `https://client.kivicoin.com/success?email=${encodeURIComponent(
         email
       )}`,
-      cancel_url: "http://localhost:3000",
+      cancel_url: "https://client.kivicoin.com",
     });
 
     const config = {
