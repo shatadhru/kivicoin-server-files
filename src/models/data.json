@@ -1,0 +1,23 @@
+{
+  "payment_id": 5603601336,
+  "invoice_id": 4813111892,
+  "payment_status": "finished",
+  "pay_address": "32zAxMqNDeFGd5gHYz2GNJUsREe1NhMYpB",
+  "payin_extra_id": null,
+  "price_amount": 600,
+  "price_currency": "usd",
+  "pay_amount": 0.00712496,
+  "actually_paid": 0,
+  "pay_currency": "btc",
+  "order_id": "290246",
+  "order_description": "Diamond",
+  "purchase_id": 4944781193,
+  "outcome_amount": 590.849436,
+  "outcome_currency": "usdttrc20",
+  "payout_hash": null,
+  "payin_hash": null,
+  "created_at": "2025-03-29T04:57:06.192Z",
+  "updated_at": "2025-03-29T04:57:23.784Z",
+  "burning_percent": "null",
+  "type": "crypto2crypto"
+}
