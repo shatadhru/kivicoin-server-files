@@ -23,10 +23,16 @@ const ReferralCode = require("./src/models/Reffarelcode_from_sender");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 
+const Withdrawal = require("./src/models/WithdrawalRequest");
 
 const Payment = require("./src/models/package_confirmation"); // Import your Payment model
 
 const axios = require("axios");
+
+const couponRoutes = require("./src/routes/couponRoutes");
+const accountRoutes = require("./src/routes/accountRoutes");
+
+const RecentActivityModels = require("./src/models/RecentActivity");
 
 dotenv.config();
 
@@ -51,6 +57,7 @@ const corsOptions = {
   origin: [
     process.env.CLIENT_URI,
     process.env.ADMIN_URI,
+    "https://client.kivicoin.com",
     "https://sandbox.nowpayments.io/",
     "https://api.nowpayments.io/",
     "https://api.nowpayments.io/v1/",
@@ -475,6 +482,22 @@ app.post("/register", async (req, res) => {
 
     // Respond with a message
     res.status(201).json({ msg: "User registered successfully! Check your email for verification." });
+
+
+
+    
+const UserActivity = new RecentActivityModels({
+  email: email,
+  activity_type: `New User Registered : ${name}`,
+});
+await UserActivity.save();
+
+    console.log("User activity saved:", UserActivity);
+
+
+
+
+    
   } catch (error) {
     console.error("Registration Error:", error);
     res.status(500).json({ msg: "Internal Server Error" });
@@ -649,6 +672,71 @@ app.post("/create-payment", async (req, res) => {
 });
 
 
+app.post("/create-payment/deposite", async (req, res) => {
+  try {
+    const { Product_Name, amount, email, Order_ID } = req.body;
+
+    console.log(Product_Name, amount, email, Order_ID);
+
+    // Input validation
+    if (!Product_Name || !amount || !email || !Order_ID) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+
+   const data = {
+     price_amount: Number(amount), // Convert string to number
+     price_currency: "usd",
+     order_id: Order_ID,
+     order_description: Product_Name,
+     ipn_callback_url: "https://server.kivicoin.com/payment-status",
+     success_url: `https://client.kivicoin.com/success/deposite?email=${encodeURIComponent(
+       email
+     )}`,
+     cancel_url: "https://client.kivicoin.com",
+   };
+
+    if (!process.env.NOWPAYMENTS_API_KEY) {
+      return res.status(500).json({ error: "Payment API key is missing" });
+    }
+
+
+    const config = {
+      method: "post",
+      maxBodyLength: Infinity,
+      url: "https://api-sandbox.nowpayments.io/v1/invoice",
+      headers: {
+        "x-api-key": process.env.NOWPAYMENTS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      data: data,
+    };
+
+    const response = await axios(config);
+   
+
+    // Log response for debugging
+    console.log("Payment response:", response.data);
+
+    // Send invoice URL back to the client
+    res.status(200).json({ invoice_url: response.data.invoice_url });
+  } catch (error) {
+    console.error(
+      "Payment request error:",
+      error.response?.data || error.message
+    );
+    res.status(500).json({
+      error:
+        "An error occurred while processing the payment. Please try again later.",
+    });
+  }
+});
+
+
 
 
 
@@ -729,6 +817,71 @@ app.post("/ipn", (req, res) => {
     });
 });
 
+
+
+app.post("/success/deposite", async (req, res) => {
+  const { email, NP_id } = req.query;
+
+  if (!email || !NP_id) {
+    return res.status(400).json({ error: "Email and NP_id are required" });
+  }
+
+  // Log the payment attempt for debugging
+  console.log(`Payment successful for: ${email} and NP_id: ${NP_id}`);
+
+  try {
+    // Find the user by email
+    const user = await User.findOne({ email: email });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const config = {
+      method: "get",
+      maxBodyLength: Infinity,
+      url: `https://api-sandbox.nowpayments.io/v1/payment/${NP_id}`,
+      headers: {
+        "x-api-key": "SSJAK5K-6JA4YP6-NH76F0Q-DR80G9S", // Use environment variable for API key
+      },
+    };
+
+    // Make the API request to get payment details
+    const response = await axios(config);
+    const paymentData = response.data;
+
+    // Log the payment response for debugging
+    console.log("Payment details:", paymentData);
+
+   
+
+    
+
+    const depositeBalance = paymentData.price_amount; 
+    const userBalance = user.balance ;
+
+    const NewBalance = userBalance + depositeBalance;
+
+    user.balance = NewBalance;
+
+    await user.save();
+
+
+    // Response message
+    res.status(200).json({
+      message: "Payment Successful!",
+      email: email,
+      paymentId: paymentData.payment_id,
+    });
+  } catch (error) {
+    console.error("Error processing payment:", error);
+    res.status(500).json({ error: "Internal Server Error Sontu be montu be" });
+  }
+});
+
+
+
+
+
 app.post("/success", async (req, res) => {
   const { email, NP_id } = req.query;
 
@@ -804,14 +957,11 @@ app.post("/success", async (req, res) => {
 
     const packagetotal_investment = paymentInfo.price;
 
-    const Newtotal_investment = total_investment + packagetotal_investment
+    const Newtotal_investment = total_investment + packagetotal_investment;
 
-
-    user.total_investment = Newtotal_investment 
+    user.total_investment = Newtotal_investment;
 
     await user.save();
-
-
 
     // Response message
     res.status(200).json({
@@ -824,11 +974,6 @@ app.post("/success", async (req, res) => {
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
-
-
-
-
-
 
 
 
@@ -1138,9 +1283,76 @@ cron.schedule("0 0 * * *", async () => {
 });
 
 
+app.post("/withdrawal/request", async (req, res) => {
+  try {
+    // Create new withdrawal
+    const withdrawal = new Withdrawal(req.body);
+    await withdrawal.save();
 
 
+    console.log("Successfull Withdrwal Request")
 
+    // Here you might want to:
+    // 1. Deduct from user's balance
+    // 2. Send confirmation email
+    // 3. Notify admin, etc.
+
+    res.status(201).send({
+      message: "Withdrawal request received",
+      withdrawal,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(400).send({
+      message: "Withdrawal request failed",
+      error: error.message,
+    });
+  }
+});
+
+
+app.get("/users/data" , async (req, res) =>{
+
+  try {
+    const users = await User.find();
+    res.status(200).json(users);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+
+});
+
+
+// Add this new route
+app.post("/packages/update-package-percentage", async (req, res) => {
+  try {
+    const { packageName, newPercentage } = req.body;
+
+    // Update all users who have this package
+    const result = await User.updateMany(
+      { "packages.Package_Name": packageName },
+      { $set: { "packages.$[elem].persentage": newPercentage } },
+      { arrayFilters: [{ "elem.Package_Name": packageName }] }
+    );
+
+    if (result.nModified === 0) {
+      return res
+        .status(404)
+        .json({ message: "Package not found or no changes made" });
+    }
+
+    res.status(200).json({ message: "Percentage updated successfully" });
+
+    console.log("Percentage updated successfully for package:", packageName);
+  } catch (error) {
+    console.error("Error updating package percentage:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.use("/api/coupons", couponRoutes);
+app.use("/api/account", accountRoutes);
 
 
 // Server listening
