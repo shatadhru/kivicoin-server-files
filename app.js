@@ -10,6 +10,9 @@ const cors = require("cors");
 const nodemailer = require("nodemailer");
 const User = require("./src/models/User");
 
+const { google } = require("googleapis");
+
+
 const cron = require("node-cron");
 
 const ejs = require("ejs");
@@ -27,12 +30,19 @@ const Withdrawal = require("./src/models/WithdrawalRequest");
 
 const Payment = require("./src/models/package_confirmation"); // Import your Payment model
 
+const ContactMessage = require("./src/models/contactData");
+
+
 const axios = require("axios");
 
 const couponRoutes = require("./src/routes/couponRoutes");
 const accountRoutes = require("./src/routes/accountRoutes");
 
+const withdrawalRoutes = require("./src/routes/withdrawalRoutes");
+
 const RecentActivityModels = require("./src/models/RecentActivity");
+
+const withdrawal_Status = require("./src/routes/withdrwalStatus")
 
 dotenv.config();
 
@@ -48,7 +58,12 @@ const PORT = 6000;
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: [process.env.CLIENT_URI, process.env.ADMIN_URI], // Frontend origins
+    origin: [
+      process.env.CLIENT_URI,
+      process.env.ADMIN_URI,
+      "http://localhost:8200",
+      "https://client.kivicoin.com",
+    ], // Frontend origins
     methods: ["GET", "POST"],
   },
 });
@@ -58,14 +73,15 @@ const corsOptions = {
     process.env.CLIENT_URI,
     process.env.ADMIN_URI,
     "https://client.kivicoin.com",
+    "http://localhost:8200",
     "https://sandbox.nowpayments.io/",
     "https://api.nowpayments.io/",
     "https://api.nowpayments.io/v1/",
     "https://sandbox.nowpayments.io/v1/",
-    
-  ], // Add both URLs here
+  ],
   methods: ["GET", "POST", "DELETE", "PUT"],
-  allowedHeaders: ["Content-Type"],
+  allowedHeaders: ["Content-Type", "Authorization"], // ✅ Add Authorization here
+  credentials: true, // যদি cookie/token পাঠাও
 };
 
 app.use(cors(corsOptions));
@@ -1353,6 +1369,276 @@ app.post("/packages/update-package-percentage", async (req, res) => {
 
 app.use("/api/coupons", couponRoutes);
 app.use("/api/account", accountRoutes);
+app.use("/api/withdrawals", withdrawalRoutes);
+
+
+// routes/withdrawal.js
+
+
+// Create a new withdrawal request
+app.post("/api/withdrawal/request", async (req, res) => {
+  try {
+    const { email, amount, paymentMethod, details } = req.body;
+
+    // Basic validation
+    if (!email || !amount || !paymentMethod || !details) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, amount, payment method and details are required",
+      });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Check balance
+    if (amount > user.balance) {
+      return res.status(400).json({
+        success: false,
+        message: "Insufficient balance",
+      });
+    }
+
+    // Create withdrawal
+    const withdrawalData = {
+      userId: user._id,
+      email,
+      amount,
+      paymentMethod,
+      status: "pending",
+    };
+
+    // Add payment method details
+    if (paymentMethod === "bank-transfer") {
+      withdrawalData.bankDetails = details;
+    } else if (paymentMethod === "paypal") {
+      withdrawalData.paypalDetails = details;
+    } else if (paymentMethod === "crypto") {
+      withdrawalData.cryptoDetails = details;
+    } else if (paymentMethod === "skrill") {
+      withdrawalData.skrillDetails = details;
+    }
+
+    const withdrawal = new Withdrawal(withdrawalData);
+    await withdrawal.save();
+
+    // Update user balance (optional - you can do this after approval)
+    // user.balance -= amount;
+    // await user.save();
+
+    res.status(201).json({
+      success: true,
+      message: "Withdrawal request submitted",
+      data: withdrawal,
+    });
+  } catch (error) {
+    console.error("Withdrawal error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+});
+
+// Get user's withdrawals by email
+app.get("/api/withdrawal/user-withdrawals", async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+    // Find withdrawals for this user
+    const withdrawals = await Withdrawal.find({ email })
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    // Separate into pending and recent
+    const pending = withdrawals.filter(
+      (w) => w.status === "pending" || w.status === "processing"
+    );
+
+    const recent = withdrawals.filter(
+      (w) =>
+        w.status === "completed" ||
+        w.status === "failed" ||
+        w.status === "cancelled"
+    );
+
+    res.status(200).json({
+      success: true,
+      data: { pending, recent },
+    });
+  } catch (error) {
+    console.error("Get withdrawals error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+});
+
+// Admin route to process withdrawals (optional)
+app.patch("/api/withdrawal/:id/process", async (req, res) => {
+  try {
+    const { status, transactionId } = req.body;
+
+    const withdrawal = await Withdrawal.findById(req.params.id);
+    if (!withdrawal) {
+      return res.status(404).json({
+        success: false,
+        message: "Withdrawal not found",
+      });
+    }
+
+    withdrawal.status = status || withdrawal.status;
+    withdrawal.transactionId = transactionId || withdrawal.transactionId;
+    withdrawal.processedAt = new Date();
+
+    await withdrawal.save();
+
+    // If completed, you might want to update user balance here
+    // Or if rejected, return funds to user balance
+
+    res.status(200).json({
+      success: true,
+      message: "Withdrawal updated",
+      data: withdrawal,
+    });
+  } catch (error) {
+    console.error("Process withdrawal error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+});
+
+
+// 1️⃣ Define the scopes
+const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+
+// 2️⃣ Initialize OAuth2 client
+const oAuth2Client = new google.auth.OAuth2(
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
+);
+
+// 3️⃣ (Optional) Route to generate the consent URL
+app.get('/auth', (req, res) => {
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES
+  });
+  res.redirect(authUrl);
+});
+
+// 4️⃣ (Optional) Callback route to handle Google OAuth redirect
+app.get('/auth/callback', async (req, res) => {
+  const code = req.query.code;
+  try {
+    const { tokens } = await oAuth2Client.getToken(code);
+    console.log('Tokens:', tokens); // <-- Save refresh_token securely in .env
+    res.send('Authentication successful! You can close this tab.');
+  } catch (err) {
+    console.error('Error retrieving access token', err);
+    res.status(500).send('Authentication failed');
+  }
+});
+
+// 5️⃣ Set credentials manually if refresh_token is already available
+oAuth2Client.setCredentials({
+  refresh_token: process.env.REFRESH_TOKEN
+});
+
+// 6️⃣ API to fetch emails
+app.get('/api/emails', async (req, res) => {
+  try {
+    const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
+    const response = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: 20
+    });
+
+    const messages = response.data.messages || [];
+    const emails = [];
+
+    for (const message of messages) {
+      const email = await gmail.users.messages.get({
+        userId: 'me',
+        id: message.id,
+        format: 'metadata',
+        metadataHeaders: ['From', 'Subject', 'Date']
+      });
+
+      const headers = email.data.payload.headers;
+      const from = headers.find(h => h.name === 'From')?.value || '';
+      const subject = headers.find(h => h.name === 'Subject')?.value || '(No subject)';
+      const date = headers.find(h => h.name === 'Date')?.value || '';
+
+      emails.push({
+        id: message.id,
+        from,
+        subject,
+        date,
+        snippet: email.data.snippet
+      });
+    }
+
+    res.json(emails);
+  } catch (error) {
+    console.error('Error fetching emails:', error);
+    res.status(500).json({ error: 'Failed to fetch emails' });
+  }
+});
+
+app.post("/api/contact", async (req, res) => {
+  const { name, email, message } = req.body;
+
+  try {
+    const newMessage = new ContactMessage({
+      name,
+      email,
+      message,
+    });
+
+    await newMessage.save();
+
+    res
+      .status(201)
+      .json({ message: "Your message has been sent successfully!" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Something went wrong, please try again." });
+  }
+});
+
+
+app.get("/api/contact/data" , async (req, res) =>{
+
+  try {
+    const messages = await ContactMessage.find();
+    res.status(200).json(messages);
+
+  }
+  catch{
+    res.status(500).json({error: "Failed to fetch messages"});
+  }
+  
+})
 
 
 // Server listening

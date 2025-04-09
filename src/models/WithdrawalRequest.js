@@ -1,5 +1,5 @@
-// models/Withdrawal.js
 const mongoose = require("mongoose");
+const mongoosePaginate = require("mongoose-paginate-v2"); // ✅ Import paginate plugin
 
 const bankAccountSchema = new mongoose.Schema({
   accountNumber: { type: String, required: true },
@@ -33,6 +33,7 @@ const skrillSchema = new mongoose.Schema({
 
 const withdrawalSchema = new mongoose.Schema({
   userId: { type: String, ref: "User", required: false },
+  email: { type: String, required: false }, 
   amount: { type: Number, required: true },
   fee: { type: Number, required: false },
   currency: { type: String, default: "USD" },
@@ -56,7 +57,7 @@ const withdrawalSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 });
 
-// Calculate fee before saving
+// ✅ Calculate fee before saving
 withdrawalSchema.pre("save", function (next) {
   const methodFees = {
     "bank-transfer": 0.015, // 1.5%
@@ -75,4 +76,8 @@ withdrawalSchema.pre("save", function (next) {
   next();
 });
 
+// ✅ Attach pagination plugin
+withdrawalSchema.plugin(mongoosePaginate);
+
+// ✅ Export model
 module.exports = mongoose.model("Withdrawal", withdrawalSchema);
