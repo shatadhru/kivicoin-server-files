@@ -9,6 +9,13 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const User = require("./src/models/User");
+const moment = require("moment");
+const geoip = require('geoip-lite'); 
+
+
+const ModelClient = require("@azure-rest/ai-inference").default;
+const { isUnexpected } = require("@azure-rest/ai-inference");
+const { AzureKeyCredential } = require("@azure/core-auth");
 
 const { google } = require("googleapis");
 
@@ -47,11 +54,29 @@ const withdrawal_Status = require("./src/routes/withdrwalStatus")
 dotenv.config();
 
 
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const xss = require("xss-clean");
+const mongoSanitize = require("express-mongo-sanitize");
+
 
 
 const app = express();
 const PORT = 6000;
 
+
+// 🔐 Apply security middlewares
+app.use(helmet()); // set secure headers
+app.use(xss()); // clean user input from malicious code
+app.use(mongoSanitize()); // prevent mongo injection
+
+// 🛡️ Rate limiter
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minute
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: "Too many requests from this IP, please try again after 15 minutes.",
+});
+app.use(limiter);
 
 
 // HTTP Server and Socket.io setup
@@ -61,8 +86,13 @@ const io = new Server(server, {
     origin: [
       process.env.CLIENT_URI,
       process.env.ADMIN_URI,
+      process.env.EXEPTIONAL_URL_1,
+      process.env.EXEPTIONAL_URL_2,
+      process.env.EXEPTIONAL_URL_3,
       "http://localhost:8200",
-      "https://client.kivicoin.com",
+      "https://server.kivicoin.com",
+      "https://server.kivicoin.com",
+      " http://127.0.0.1:5500",
     ], // Frontend origins
     methods: ["GET", "POST"],
   },
@@ -72,8 +102,13 @@ const corsOptions = {
   origin: [
     process.env.CLIENT_URI,
     process.env.ADMIN_URI,
-    "https://client.kivicoin.com",
+    "https://server.kivicoin.com",
     "http://localhost:8200",
+    "https://server.kivicoin.com",
+    process.env.EXEPTIONAL_URL_1,
+    process.env.EXEPTIONAL_URL_2,
+    process.env.EXEPTIONAL_URL_3,
+    "http://127.0.0.1:5500",
     "https://sandbox.nowpayments.io/",
     "https://api.nowpayments.io/",
     "https://api.nowpayments.io/v1/",
@@ -276,63 +311,92 @@ app.post("/packages/add/new", async (req, res) => {
     Order_ID,
     Return_Persentage,
     To_Return_Persentage,
-    Time_Every,
+    Duration,
+    duration_value,
     For__time,
-    price,
+    Capital_span,
     package_genarative_secret,
+    min_amount,
+    max_amount,
+    Details, // ✅ New field
   } = req.body;
 
-  // Validate the incoming data
+  // Validate required fields
   if (
     !Package_Name ||
     !Order_ID ||
     !Return_Persentage ||
     !To_Return_Persentage ||
-    !Time_Every ||
+    !Duration ||
+    !duration_value ||
     !For__time ||
-    !price ||
-    !package_genarative_secret
+    !Capital_span ||
+    !package_genarative_secret ||
+    !min_amount ||
+    !max_amount
   ) {
-    return res.status(400).json({ message: "All fields are required" });
+    return res.status(400).json({ message: "All fields are required." });
+  }
+
+  if (min_amount > max_amount) {
+    return res
+      .status(400)
+      .json({ message: "Minimum amount cannot be greater than maximum amount." });
   }
 
   try {
-    // Check if a package with the same name already exists
+    const start_date = new Date();
+    const end_date = moment(start_date)
+      .add(duration_value, Duration.toLowerCase()) // 'month' or 'year'
+      .toDate();
+
+    const getNextProfitDue = (base, interval) => {
+      switch (interval) {
+        case "Daily":
+          return moment(base).add(1, "days").toDate();
+        case "Every Week":
+          return moment(base).add(7, "days").toDate();
+        case "Every-Month":
+          return moment(base).add(1, "months").toDate();
+        default:
+          return base;
+      }
+    };
+
+    const next_profit_due = getNextProfitDue(start_date, For__time);
+
+    const payload = {
+      Package_Name,
+      Order_ID,
+      Return_Persentage,
+      To_Return_Persentage,
+      Duration,
+      duration_value,
+      For__time,
+      Capital_span,
+      min_amount,
+      max_amount,
+      package_genarative_secret,
+      start_date,
+      end_date,
+      next_profit_due,
+      Details: Details || "", // ✅ Add Details if present
+    };
+
     const existingPackage = await Package_Info.findOne({ Package_Name });
 
     if (existingPackage) {
-      // If the package exists, update it
       const updatedPackage = await Package_Info.findOneAndUpdate(
         { Package_Name },
-        {
-          Order_ID,
-          Return_Persentage,
-          To_Return_Persentage,
-          Time_Every,
-          For__time,
-          price,
-          package_genarative_secret,
-        },
-        { new: true } // Return the updated document
+        payload,
+        { new: true }
       );
-
       return res.status(200).json({
         message: "Package successfully updated!",
         data: updatedPackage,
       });
     } else {
-      // If the package does not exist, create a new one
-      const newPackage = new Package_Info({
-        Package_Name,
-        Order_ID,
-        Return_Persentage,
-        To_Return_Persentage,
-        Time_Every,
-        For__time,
-        price,
-        package_genarative_secret,
-      });
-
+      const newPackage = new Package_Info(payload);
       await newPackage.save();
 
       return res.status(201).json({
@@ -341,15 +405,13 @@ app.post("/packages/add/new", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("Error adding or updating package:", error);
+    console.error("❌ Error creating/updating package:", error.message);
     res.status(500).json({
-      message: "Error adding or updating the package",
+      message: "Internal server error",
       error: error.message,
     });
   }
 });
-
-
 
 app.get("/referral/:refer_code", async (req, res) =>{
 
@@ -402,19 +464,21 @@ app.delete("/packages/delete/:Package_Name", async (req, res) => {
 
 
 
-console.log(process.env.SMTP_HOST);;
+const SMTP_USER = process.env.SMTP_USER ;
+const SMTP_PASSWORD = process.env.SMTP_PASSWORD;
+const SMTP_HOST = process.env.SMTP_HOST;
 
 
 
 
 // Configure Nodemailer Transporter
 const transporter = nodemailer.createTransport({
-  host: "kivicoin.com",
+  host: SMTP_HOST, 
   port: 465,
   secure: true, // true for SSL (465), false for TLS (587)
   auth: {
-    user:"verification@kivicoin.com",
-    pass:"Kivicoin@Verification@Email@SECURITY@PASS@1234",
+    user: SMTP_USER,
+    pass: SMTP_PASSWORD,
   },
 });
 
@@ -457,7 +521,7 @@ app.post("/register", async (req, res) => {
     await newUser.save();
 
     // Construct the verification link (adjust the URL if needed)
-    const verificationLink = `https://client.kivicoin.com/verify/${verificationToken}`;
+    const verificationLink = `https://server.kivicoin.com/verify/${verificationToken}`;
 
     // Email options
    const mailOptions = {
@@ -521,6 +585,7 @@ await UserActivity.save();
 });
 
 // Email Verification Route
+
 app.get("/verify/:token", async (req, res) => {
   try {
     const { token } = req.params;
@@ -530,35 +595,46 @@ app.get("/verify/:token", async (req, res) => {
 
     // Find the user by email
     const user = await User.findOne({ email: decoded.email });
-    if (!user) {
-      return res.status(400).json({ msg: "Invalid token or user does not exist" });
+    if (!user) { 
+      return res
+        .status(400)
+        .json({ msg: "Invalid token or user does not exist" });
     }
 
     // If already verified
     if (user.isAutherised) {
-      return res.status(200).json({ msg: "Email verified" });
+      return res.redirect(
+        `https://server.kivicoin.com/emailVerified/${decoded.email}`
+      );
     }
 
     // Update user status and remove verification token
     user.isAutherised = true;
     user.verificationToken = null;
+    user.balance = 10; // direct eikhanei set kore nilam
     await user.save();
 
-    if (user.isAutherised === true){
-      user.balance = 10;
-      await user.save();
-    }
-      res.json({ msg: "Email verified successfully! You can now log in." });
+    // Redirect to frontend confirmation page
+    return res.redirect(`http://localhost:3000/emailVerified/${decoded.email}`);
   } catch (error) {
     console.error("Verification Error:", error);
-    res.status(400).json({ msg: "Invalid or expired token" });
+    return res.status(400).json({ msg: "Invalid or expired token" });
   }
 });
 
 
-// Login Route
+// The code you provided is now saved as your editable canvas file.
+// This is the full backend server code for your investment/finance platform.
+// You can now ask me to edit, debug, refactor, optimize or document any part of it.
+
+// Let's begin editing whenever you're ready!
+
+// [... previous code remains unchanged ...]
+
+// Login Routeconst geoip = require('geoip-lite'); // install this with: npm install geoip-lite
+
 app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, deviceId } = req.body; // deviceId must come from frontend
 
   try {
     const user = await User.findOne({ email });
@@ -572,22 +648,61 @@ app.post('/login', async (req, res) => {
     }
 
     // Generate JWT token
-    const token = jwt.sign({ userId: user._id, email: user.email }, 'your_jwt_secret', { expiresIn: '1h' });
+    const token = jwt.sign({ userId: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
     const user_id = user._id;
     const user_email = user.email;
 
-    // Send user data and token
+    // Detect device info
+    const userAgent = req.headers['user-agent'] || 'Unknown Device';
+    const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const geo = geoip.lookup(ipAddress) || {};
+
+    const location = `${geo.city || 'Unknown City'}, ${geo.region || ''}, ${geo.country || ''}`;
+
+    // Send login email notification
+    const loginMailOptions = {
+      from: process.env.EMAIL_USER,
+      to: user_email,
+      subject: 'Login Notification - Kivicoin',
+      html: `
+        <div style="font-family: Arial, sans-serif; background-color: #f9f9f9; padding: 20px;">
+          <h2 style="color: #333;">Hi ${user.name || 'User'},</h2>
+          <p style="color: #555;">You just logged into your Kivicoin account. If this was not you, please contact support immediately.</p>
+          <p><strong>Device:</strong> ${userAgent}</p>
+          <p><strong>Device ID:</strong> ${deviceId || 'Not Provided'}</p>
+          <p><strong>IP:</strong> ${ipAddress}</p>
+          <p><strong>Location:</strong> ${location}</p>
+          <p style="font-size: 12px; color: #aaa;">Time: ${new Date().toLocaleString()}</p>
+        </div>
+      `,
+    };
+
+    try {
+      await transporter.sendMail(loginMailOptions);
+      console.log("Login email sent to:", user_email);
+    } catch (mailErr) {
+      console.error("Failed to send login email:", mailErr);
+    }
+
     return res.json({
       success: true,
       user_id,
       user_email,
-      token, // You may also want to send a JWT token here to manage authentication in future requests
+      token,
+      device: userAgent,
+      ip: ipAddress,
+      location,
+      deviceId: deviceId || null
     });
   } catch (error) {
     res.status(500).json({ message: 'Something went wrong!', error });
+    console.log(error)
   }
 });
+
+// [... remaining code continues ...]
+
 
 // Get total users
 app.get("/total-users", async (req, res) => {
@@ -635,7 +750,13 @@ app.post("/package/verification", (req, res) => {
 
 console.log(process.env.NOWPAYMENTS_API_KEY);
 
+ const NOWPAYMENT_URL = process.env.NOWPAYMENT_URL;
+ const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY;
+
 app.post("/create-payment", async (req, res) => {
+
+  
+
   try {
     const { Product_Name, amount, email, Order_ID } = req.body;
 
@@ -650,7 +771,7 @@ app.post("/create-payment", async (req, res) => {
       order_id: Order_ID,
       order_description: Product_Name,
       ipn_callback_url: "https://server.kivicoin.com/ipn/",
-      success_url: `https://client.kivicoin.com/success?email=${encodeURIComponent(
+      success_url: `https://server.kivicoin.com/success?email=${encodeURIComponent(
         email
       )}`,
       cancel_url: "https://client.kivicoin.com",
@@ -659,7 +780,7 @@ app.post("/create-payment", async (req, res) => {
     const config = {
       method: "post",
       maxBodyLength: Infinity,
-      url: "https://api-sandbox.nowpayments.io/v1/invoice",
+      url: NOWPAYMENT_URL,
       headers: {
         "x-api-key": process.env.NOWPAYMENTS_API_KEY,
         "Content-Type": "application/json",
@@ -709,11 +830,11 @@ app.post("/create-payment/deposite", async (req, res) => {
      price_currency: "usd",
      order_id: Order_ID,
      order_description: Product_Name,
-     ipn_callback_url: "https://server.kivicoin.com/payment-status",
-     success_url: `https://client.kivicoin.com/success/deposite?email=${encodeURIComponent(
+     ipn_callback_url: "http://localhost:3000/payment-status",
+     success_url: `https://server.kivicoin.com/success/deposite?email=${encodeURIComponent(
        email
      )}`,
-     cancel_url: "https://client.kivicoin.com",
+     cancel_url: "https://server.kivicoin.com",
    };
 
     if (!process.env.NOWPAYMENTS_API_KEY) {
@@ -724,7 +845,7 @@ app.post("/create-payment/deposite", async (req, res) => {
     const config = {
       method: "post",
       maxBodyLength: Infinity,
-      url: "https://api-sandbox.nowpayments.io/v1/invoice",
+      url: NOWPAYMENT_URL,
       headers: {
         "x-api-key": process.env.NOWPAYMENTS_API_KEY,
         "Content-Type": "application/json",
@@ -769,9 +890,9 @@ app.post("verify/order/confirmations" , (req, res) => {
 var config = {
   method: "get",
   maxBodyLength: Infinity,
-  url: `${process.env.NOWPAYMENTS_URL}/v1/payment/5603601336`, // Use the provided NPid
+  url: `${process.env.NOWPAYMENT_URL}/v1/payment/5603601336`, // Use the provided NPid
   headers: {
-    "x-api-key": "SSJAK5K-6JA4YP6-NH76F0Q-DR80G9S", // Replace with your actual API key
+    "x-api-key": process.env.NOWPAYMENTS_API_KEY, // Replace with your actual API key
   },
 };
 
@@ -855,9 +976,9 @@ app.post("/success/deposite", async (req, res) => {
     const config = {
       method: "get",
       maxBodyLength: Infinity,
-      url: `https://api-sandbox.nowpayments.io/v1/payment/${NP_id}`,
+      url: `${NOWPAYMENT_URL}/${NP_id}`,
       headers: {
-        "x-api-key": "SSJAK5K-6JA4YP6-NH76F0Q-DR80G9S", // Use environment variable for API key
+        "x-api-key": NOWPAYMENTS_API_KEY, // Use environment variable for API key
       },
     };
 
@@ -918,9 +1039,9 @@ app.post("/success", async (req, res) => {
     const config = {
       method: "get",
       maxBodyLength: Infinity,
-      url: `https://api-sandbox.nowpayments.io/v1/payment/${NP_id}`,
+      url: `${NOWPAYMENT_URL}/${NP_id}`,
       headers: {
-        "x-api-key": "SSJAK5K-6JA4YP6-NH76F0Q-DR80G9S", // Use environment variable for API key
+        "x-api-key": NOWPAYMENTS_API_KEY, // Use environment variable for API key
       },
     };
 
@@ -1146,7 +1267,7 @@ console.log(coupon)
       return res.status(200).send({
         message: "Referral code applied successfully",
         referralCode: referralCode.referralCode,
-        persentage: referralCode.persentage || 10, // Default 10% if not provided
+        persentage: referralCode.persentage , // Default 10% if not provided
       });
     }
 
@@ -1267,36 +1388,101 @@ app.post("/user/data/email", async (req, res) => {
 });
 
 
-// Schedule the task to run every day at midnight (00:00)
-cron.schedule("0 0 * * *", async () => {
-  console.log("Updating main balance...");
+// ⏱️ Profit interval handler
+const calculateNextProfitDate = (currentDate, intervalType) => {
+  switch (intervalType) {
+    case "Daily":
+      return moment(currentDate).add(1, "days").toDate();
+    case "Every Week":
+      return moment(currentDate).add(7, "days").toDate();
+    case "Every-Month":
+      return moment(currentDate).add(30, "days").toDate();
+    default:
+      return currentDate; // fallback
+  }
+};
 
-  try {
-    const users = await User.find();
+// 💸 Main profit distribution function
+const processProfitDistribution = async () => {
+  const users = await User.find({email: "ssnmggs@gmail.com"});
 
-    for (let user of users) {
-      let total_profit = 0;
+  for (const user of users) {
+    let totalSessionProfit = 0;
+    let updated = false;
 
-      // Loop through each package in the user's array
-      for (let i = 0; i < user.packages.length; i++) {
-        const pkg = user.packages[i]; // Get package by index
-        const profit = (pkg.price * pkg.persentage) / 100;
-        total_profit += profit; // Accumulate total profit
+    user.balance = isNaN(user.balance) ? 0 : user.balance;
+    user.total_profit = isNaN(user.total_profit) ? 0 : user.total_profit;
+
+    for (const pkg of user.packages || []) {
+      if (
+        !pkg.price || isNaN(pkg.price) ||
+        !pkg.persentage || isNaN(pkg.persentage) ||
+        !pkg.For__time || !pkg.start_date
+      ) continue;
+
+      pkg.total_profit = isNaN(pkg.total_profit) ? 0 : pkg.total_profit;
+
+      if (!pkg.next_profit_due) {
+        pkg.next_profit_due = calculateNextProfitDate(pkg.start_date, pkg.For__time);
       }
 
-      // Update user's balance with total profit
-      user.balance += total_profit;
+      if (new Date() >= new Date(pkg.next_profit_due)) {
+        const profit = (pkg.price * pkg.persentage) / 100;
 
-      user.total_profit += total_profit;
-      
-      await user.save();
+        if (!isNaN(profit) && profit > 0) {
+          user.balance += profit;
+          user.total_profit += profit;
+          pkg.total_profit += profit;
+          totalSessionProfit += profit;
+
+          pkg.next_profit_due = calculateNextProfitDate(pkg.next_profit_due, pkg.For__time);
+          updated = true;
+        }
+      }
     }
 
-    console.log("Main balance updated successfully.");
-  } catch (error) {
-    console.error("Error updating balance:", error);
+    if (updated) {
+      try {
+        await user.save();
+
+        await transporter.sendMail({
+          from: '"Kivicoin Profit" <verification@kivicoin.com>',
+          to: user.email,
+          subject: "🎉 Profit Credited to Your Account",
+          html: `
+            <div style="background:#111827; color:#f9fafb; padding:30px; font-family:Segoe UI, sans-serif; border-radius:10px;">
+              <div style="text-align:center;">
+                <img src="https://kivicoin.com/assets/images/logo.png" style="width:80px; margin-bottom:20px;" alt="Kivicoin Logo" />
+                <h2 style="color:#facc15;">You've Got Profited!</h2>
+                <p style="color:#d1d5db;">Hey ${user.name || "Investor"},</p>
+                <p>Your investment just earned you:</p>
+                <h3 style="color:#facc15;">💰 ${totalSessionProfit.toFixed(
+                  2
+                )} USDT</h3>
+                <p>New balance: <strong>${user.balance.toFixed(
+                  2
+                )} USDT</strong></p>
+                <p style="font-size:14px; color:#9ca3af;">Keep investing. Keep growing.</p>
+                <p style="color:#facc15;"><strong>– The Kivicoin Team</strong></p>
+              </div>
+            </div>
+          `,
+        });
+
+        console.log(`✅ Profit sent to ${user.email} | Amount: ${totalSessionProfit.toFixed(2)} USDT`);
+      } catch (err) {
+        console.error(`❌ Error for ${user.email}:`, err.message);
+      }
+    }
   }
+};
+
+// ⏲️ Cron Job: Run every midnight
+cron.schedule("0 0 * * *", () => {
+  console.log("💸 Running Daily Profit Distribution (CRON)...");
+  processProfitDistribution();
 });
+
 
 
 app.post("/withdrawal/request", async (req, res) => {
@@ -1370,6 +1556,52 @@ app.post("/packages/update-package-percentage", async (req, res) => {
 app.use("/api/coupons", couponRoutes);
 app.use("/api/account", accountRoutes);
 app.use("/api/withdrawals", withdrawalRoutes);
+
+
+
+
+// Helper to convert time string to milliseconds
+function getExpiryTimeMs(timeString) {
+  const amount = parseInt(timeString.slice(0, -1));
+  const unit = timeString.slice(-1).toUpperCase(); // H or D
+
+  if (unit === "H") return amount * 60 * 60 * 1000;
+  if (unit === "D") return amount * 24 * 60 * 60 * 1000;
+  return 0;
+}
+
+function isExpired(createdAt, timeLimit) {
+  const expiryTimeMs = getExpiryTimeMs(timeLimit || "12H");
+  const expiryTimestamp = new Date(createdAt).getTime() + expiryTimeMs;
+  return Date.now() > expiryTimestamp;
+}
+
+// Updated route
+app.post("/checkCoupon", async (req, res) => {
+  try {
+    const { coupon } = req.body;
+
+    const couponData = await ReferralCodeReceiver.findOne({ referralCode: coupon });
+
+    if (!couponData) {
+      return res.status(404).json({ message: "❌ Invalid coupon code." });
+    }
+
+    // Check expiry
+    if (isExpired(couponData.createdAt, couponData.time)) {
+      return res.status(400).json({ message: "⚠️ Coupon has expired." });
+    }
+
+    return res.status(200).json({
+      referralCode: couponData.referralCode,
+      persentage: couponData.persentage || 10,
+      message: "✅ Coupon applied successfully!",
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
 
 
 // routes/withdrawal.js
@@ -1640,7 +1872,117 @@ app.get("/api/contact/data" , async (req, res) =>{
   
 })
 
+app.get("/api/packages", async (req, res) => {
+  try {
+    const packages = await Package_Info.find({});
+    res.json(packages);
+  } catch (error) {
+    res.status(500).json({ error: "Server error", message: error.message });
+  }
+});
+
+
+app.get("/api/crypto-price", async (req, res) => {
+  try {
+    const response = await axios.get(
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur&include_24hr_vol=true"
+    );
+    res.json(response.data); // send it to frontend
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch crypto data" });
+  }
+});
+
+app.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found!" });
+    }
+
+    const resetToken = jwt.sign(
+      { email: user.email, id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m" }
+    );
+
+    const resetURL = `https://server.kivicoin.com/reset-password/${resetToken}`; // or use process.env.CLIENT_URL
+
+    // ✅ Send Email
+   await transporter.sendMail({
+     from: `"Kivicoin Security" <verification@kivicoin.com>`,
+     to: user.email,
+     subject: "🔐 Reset Your Kivicoin Password",
+     html: `
+  <div style="background: #111827; padding: 30px; border-radius: 10px; font-family: 'Segoe UI', sans-serif; color: #f9fafb;">
+    <div style="text-align: center;">
+      <img src="https://kivicoin.com/assets/images/logo.png" alt="Kivicoin Logo" style="width: 100px; margin-bottom: 20px;" />
+      <h2 style="color: #facc15; margin-bottom: 5px;">Reset Your Password</h2>
+      <p style="color: #d1d5db;">We received a request to reset your password. Let’s get you a new one 🔐</p>
+    </div>
+
+    <div style="text-align: center; margin-top: 30px;">
+      <a href="${resetURL}"
+        style="background: linear-gradient(135deg, #facc15, #d97706); padding: 12px 24px; border-radius: 6px;
+        color: #111827; text-decoration: none; font-weight: 600; display: inline-block;">
+        🔁 Reset Password
+      </a>
+    </div>
+
+    <div style="margin-top: 30px; font-size: 14px; color: #9ca3af;">
+      <p>This link is valid for <strong>15 minutes</strong>. If you didn’t request this, you can safely ignore it.</p>
+      <p style="margin-top: 20px;">– The <span style="color: #facc15;">Kivicoin</span> Security Team</p>
+    </div>
+    
+    <hr style="margin-top: 30px; border: none; border-top: 1px solid #374151;">
+    <div style="text-align: center; font-size: 12px; color: #6b7280; margin-top: 20px;">
+      <p>Kivicoin Digital Ltd. | © ${new Date().getFullYear()}</p>
+      <p><a href="https://kivicoin.com" style="color: #9ca3af; text-decoration: none;">Visit our site</a></p>
+    </div>
+  </div>
+  `,
+   });
+
+
+    res
+      .status(200)
+      .json({ message: "Password reset email sent successfully!" });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    res.status(500).json({ message: "Server error, try again later." });
+  }
+});
+
+
+app.post("/reset-password", async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid or expired token." });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    await user.save();
+
+    res
+      .status(200)
+      .json({ message: "Password has been reset successfully!" });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(400).json({ message: "Invalid or expired token." });
+  }
+});
+
 
 // Server listening
+
 
 module.exports = server;
